@@ -2,6 +2,12 @@
 
 This repository contains two independent projects exploring machine learning through practical implementation and interactive applications.
 
+## Authors:
+ - Abhishek Ramesh Potti: EC24I2029
+ - Arpit Srivastava: EC24I1001
+ - Archith G: EC24I1016
+
+
 ## Projects
 
 ### 1. Bank Marketing Classification
