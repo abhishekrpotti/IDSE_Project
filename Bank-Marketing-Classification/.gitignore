@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments and local settings
+.venv/
+venv/
+env/
+.env
+.env.*
+.idea/
+.vscode/
+
+# OS and editor temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*~
+.ipynb_checkpoints/
+
+# Local source data and generated experiment artifacts
+data/raw/
+models/
+reports/tables/
+reports/phase1_dataset_audit.md
+reports/phase2_eda.md
+reports/model_comparison.md
+reports/phase4_optimization.md
+reports/final_model_evaluation.md
+
+# Logs and temporary outputs
+*.log
+*.out

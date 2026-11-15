@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450.0" y="38" text-anchor="middle" font-family="Arial" font-size="22">Target class distribution</text>
+<path d="M 100 80 V 390 H 875" stroke="#333" fill="none"/>
+<rect x="267.2" y="80.0" width="48.0" height="310.0" fill="#2864a5"/>
+<text x="291.2" y="412" text-anchor="middle" font-family="Arial" font-size="12">no</text>
+<text x="291.2" y="74.0" text-anchor="middle" font-family="Arial" font-size="11">39,922</text>
+<rect x="649.8" y="348.9" width="48.0" height="41.1" fill="#2864a5"/>
+<text x="673.8" y="412" text-anchor="middle" font-family="Arial" font-size="12">yes</text>
+<text x="673.8" y="342.9" text-anchor="middle" font-family="Arial" font-size="11">5,289</text>
+</svg>
