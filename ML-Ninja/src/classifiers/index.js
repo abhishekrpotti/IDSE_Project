@@ -1,113 +1,78 @@
-import { Perceptron } from './perceptron.js';
-import { LogisticRegression } from './logistic.js';
-import { LinearSVM } from './svm.js';
-import { KernelSVM } from './kernelSvm.js';
-import { KNN } from './knn.js';
-import { GaussianNaiveBayes } from './naiveBayes.js';
-import { DiscriminantAnalysis } from './lda.js';
-import { DecisionTree } from './tree.js';
-import { RandomForest } from './forest.js';
-import { MLP } from './mlp.js';
+import {rng} from '../data/rng.js';
+import {makeData} from '../data/generators.js';
 
-export const CLASSIFIERS = {
-  perceptron: {
-    id: 'perceptron',
-    name: 'Perceptron',
-    Class: Perceptron,
-    formula: 'w · x + b = 0',
-    summary: 'The simplest linear binary classifier. Iteratively updates its weight vector whenever it encounters a misclassified training sample.',
-    whenItFails: 'Fails to converge when data is not linearly separable (e.g. XOR, concentric circles, interleaved moons).',
-    defaultParams: { lr: 0.1, epochs: 40 }
-  },
-  logistic: {
-    id: 'logistic',
-    name: 'Logistic Regression',
-    Class: LogisticRegression,
-    formula: 'P(y=1|x) = 1 / (1 + e^{-(w·x + b)})',
-    summary: 'Models the posterior class probability using a logistic sigmoid link function, trained via gradient descent on binary cross-entropy loss.',
-    whenItFails: 'Strictly linear decision boundary; unable to separate non-linear distributions like XOR without feature transforms.',
-    defaultParams: { lr: 0.25, epochs: 70 }
-  },
-  svm: {
-    id: 'svm',
-    name: 'Linear SVM',
-    Class: LinearSVM,
-    formula: 'min 1/2||w||² + C ∑ max(0, 1 - y_i(w·x_i + b))',
-    summary: 'Finds the optimal separating hyperplane that maximizes the geometric margin between classes, guided by the closest support vectors.',
-    whenItFails: 'Fails on non-linearly separable distributions when restricted to a linear kernel.',
-    defaultParams: { C: 1.0, lr: 0.05, epochs: 60 }
-  },
-  kernelSvm: {
-    id: 'kernelSvm',
-    name: 'Kernel SVM (RBF)',
-    Class: KernelSVM,
-    formula: 'K(x, x\') = exp(-γ ||x - x\'||²)',
-    summary: 'Implicitly projects 2D features into an infinite-dimensional Hilbert space via the RBF kernel to draw flexible non-linear margins.',
-    whenItFails: 'Prone to severe overfitting if gamma (γ) or C is set excessively high, memorizing individual noise points.',
-    defaultParams: { kernel: 'rbf', gamma: 0.6, C: 2.5, lr: 0.06, epochs: 50 }
-  },
-  knn: {
-    id: 'knn',
-    name: 'k-Nearest Neighbors',
-    Class: KNN,
-    formula: 'y_pred = mode({y_i : x_i ∈ N_k(x)})',
-    summary: 'Non-parametric instance-based lazy learner. Classifies new query points by taking a majority vote among its k closest neighbors in feature space.',
-    whenItFails: 'High sensitivity to noise and outliers when k=1; computationally expensive inference on large datasets; metric distortion.',
-    defaultParams: { k: 5, metric: 'euclidean' }
-  },
-  naiveBayes: {
-    id: 'naiveBayes',
-    name: 'Gaussian Naive Bayes',
-    Class: GaussianNaiveBayes,
-    formula: 'P(c|x) ∝ P(c) ∏ N(x_j; μ_cj, σ²_cj)',
-    summary: 'Probabilistic generative model assuming all features are conditionally independent given the class label. Fits axis-aligned Gaussian distributions.',
-    whenItFails: 'Breaks down when features have strong correlations (fails to rotate covariance ellipses) or multi-modal clusters.',
-    defaultParams: {}
-  },
-  lda: {
-    id: 'lda',
-    name: 'Linear Discriminant Analysis',
-    Class: DiscriminantAnalysis,
-    formula: 'δ_k(x) = xᵀ Σ⁻¹ μ_k - 1/2 μ_kᵀ Σ⁻¹ μ_k + log π_k',
-    summary: 'Models classes as multivariate Gaussians with identical pooled covariance matrix Σ, resulting in an optimal linear decision surface.',
-    whenItFails: 'Fails when classes have drastically unequal variances or non-linear separation curves (switch to QDA mode).',
-    defaultParams: { mode: 'lda' }
-  },
-  qda: {
-    id: 'qda',
-    name: 'Quadratic Discriminant Analysis',
-    Class: DiscriminantAnalysis,
-    formula: 'δ_k(x) = -1/2 log|Σ_k| - 1/2(x-μ_k)ᵀ Σ_k⁻¹(x-μ_k) + log π_k',
-    summary: 'Generative Gaussian classifier allowing distinct covariance matrices for each class, yielding quadratic curved boundaries.',
-    whenItFails: 'Requires more data points to estimate covariance matrices reliably; can overfit with small sample sizes.',
-    defaultParams: { mode: 'qda' }
-  },
-  tree: {
-    id: 'tree',
-    name: 'Decision Tree (CART)',
-    Class: DecisionTree,
-    formula: 'Gini = 1 - ∑ p_i², split argmax ΔGini',
-    summary: 'Recursively partitions feature space using orthogonal axis-aligned splits that maximize Gini impurity reduction or information gain.',
-    whenItFails: 'High variance and instability; diagonal decision boundaries require deep stairstep approximations.',
-    defaultParams: { maxDepth: 4, minSamplesSplit: 2, criterion: 'gini' }
-  },
-  forest: {
-    id: 'forest',
-    name: 'Random Forest',
-    Class: RandomForest,
-    formula: 'y_pred = 1/B ∑ Tree_b(x)',
-    summary: 'Ensemble of decorrelated decision trees trained on bootstrapped subsets of the data. Reduces variance through democratic majority voting.',
-    whenItFails: 'Slightly slower inference and loss of tree interpretability compared to a single decision tree.',
-    defaultParams: { nTrees: 6, maxDepth: 4 }
-  },
-  mlp: {
-    id: 'mlp',
-    name: 'Multi-Layer Perceptron',
-    Class: MLP,
-    formula: 'y = σ(W₂ · tanh(W₁ x + b₁) + b₂)',
-    summary: 'Artificial neural network with a non-linear hidden layer that learns internal distributed representations via backpropagation gradient descent.',
-    whenItFails: 'Susceptible to getting trapped in local minima or slow convergence if learning rate is improperly tuned.',
-    defaultParams: { hiddenDim: 8, lr: 0.15, epochs: 80 }
-  }
-};
+const EPS=1e-9;
+const sign=v=>v>=0?1:-1;
+const dot=(a,b)=>a.reduce((sum,value,index)=>sum+value*b[index],0);
+const sigmoid=value=>1/(1+Math.exp(-Math.max(-35,Math.min(35,value))));
+const shuffle=(array,random)=>{for(let i=array.length-1;i>0;i--){const j=Math.floor(random()*(i+1));[array[i],array[j]]=[array[j],array[i]]}return array};
+function standardizer(X){const mean=[0,1].map(j=>X.reduce((s,x)=>s+x[j],0)/Math.max(X.length,1));const scale=[0,1].map(j=>Math.sqrt(X.reduce((s,x)=>s+(x[j]-mean[j])**2,0)/Math.max(X.length,1))||1);return{mean,scale,transform:x=>x.map((v,j)=>(v-mean[j])/scale[j])}}
+function covariance(rows,mean,ridge=0){let a=0,b=0,c=0;for(const x of rows){const u=x[0]-mean[0],v=x[1]-mean[1];a+=u*u;b+=u*v;c+=v*v}const n=Math.max(rows.length-1,1);return[[a/n+ridge,b/n],[b/n,c/n+ridge]]}
+function inverse2(matrix){const [[a,b],[c,d]]=matrix;const det=a*d-b*c;if(Math.abs(det)<EPS)return[[1/EPS,0],[0,1/EPS]];return[[d/det,-b/det],[-c/det,a/det]]}
+function quadratic(x,mean,inv){const d=[x[0]-mean[0],x[1]-mean[1]],m=[inv[0][0]*d[0]+inv[0][1]*d[1],inv[1][0]*d[0]+inv[1][1]*d[1]];return dot(d,m)}
+function baseMetadata(name,family,boundaryShape,hyperparams,explanation){return{name,family,boundaryShape,hyperparams,explanation}}
+class Model{constructor(name,family,shape,defaults,explanation){this.name=name;this.metadata=baseMetadata(name,family,shape,{...defaults},explanation);this.hyperparams={...defaults};this.supportVectors=[]}setParams(params={}){this.hyperparams={...this.metadata.hyperparams,...params};return this}}
 
+export class Perceptron extends Model{
+  constructor(params={}){super('Perceptron','linear','line',{epochs:120,learningRate:.08},'Updates a weighted straight line only when it misclassifies an example. It is simple and fast, but outliers and overlapping classes can make its final line depend on presentation order.');this.setParams(params)}
+  fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.scaler=standardizer(X);const Z=X.map(x=>this.scaler.transform(x));this.w=[0,0];this.b=0;const random=rng(this.hyperparams.seed??17),ids=X.map((_,i)=>i);for(let epoch=0;epoch<this.hyperparams.epochs;epoch++){let mistakes=0;for(const i of shuffle([...ids],random))if(y[i]*(dot(this.w,Z[i])+this.b)<=0){this.w=this.w.map((v,j)=>v+this.hyperparams.learningRate*y[i]*Z[i][j]);this.b+=this.hyperparams.learningRate*y[i];mistakes++}this.epochsRun=epoch+1;if(mistakes===0)break}this.supportVectors=[];return this}
+  score(x){return dot(this.w,this.scaler.transform(x))+this.b}predict(x){return sign(this.score(x))}predictProba(x){return sigmoid(this.score(x))}*fitSteps(){yield this}
+}
+
+export class LogisticRegression extends Model{
+  constructor(params={}){super('Logistic Regression','linear','line',{epochs:220,learningRate:.04,l2:.015},'Optimizes logistic log-loss with a sigmoid probability and a small L2 penalty. It gives smooth confidence estimates, but a single straight line cannot follow curved patterns.');this.setParams(params)}
+  fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.scaler=standardizer(X);const Z=X.map(x=>this.scaler.transform(x));this.w=[0,0];this.b=0;const n=Math.max(X.length,1);for(let epoch=0;epoch<this.hyperparams.epochs;epoch++){const gw=[this.hyperparams.l2*this.w[0],this.hyperparams.l2*this.w[1]];let gb=0;for(let i=0;i<n;i++){const error=sigmoid(dot(this.w,Z[i])+this.b)-(y[i]===1?1:0);gw[0]+=error*Z[i][0]/n;gw[1]+=error*Z[i][1]/n;gb+=error/n}this.w[0]-=this.hyperparams.learningRate*gw[0];this.w[1]-=this.hyperparams.learningRate*gw[1];this.b-=this.hyperparams.learningRate*gb}this.supportVectors=[];return this}
+  score(x){return dot(this.w,this.scaler.transform(x))+this.b}predict(x){return this.score(x)>=0?1:-1}predictProba(x){return sigmoid(this.score(x))}*fitSteps(){yield this}
+}
+
+export class LinearSVM extends Model{
+  constructor(params={}){super('Linear SVM','linear','line',{epochs:260,learningRate:.035,C:1},'Minimizes L2 weight cost plus hinge loss. The margin focuses training on difficult points; a straight boundary still fails on XOR-like shapes.');this.setParams(params)}
+  fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.scaler=standardizer(X);const Z=X.map(x=>this.scaler.transform(x));this.w=[0,0];this.b=0;const n=Math.max(X.length,1),lambda=1/Math.max(this.hyperparams.C,EPS);for(let epoch=0;epoch<this.hyperparams.epochs;epoch++){let gw=[lambda*this.w[0],lambda*this.w[1]],gb=0;for(let i=0;i<n;i++)if(y[i]*(dot(this.w,Z[i])+this.b)<1){gw[0]-=this.hyperparams.C*y[i]*Z[i][0]/n;gw[1]-=this.hyperparams.C*y[i]*Z[i][1]/n;gb-=this.hyperparams.C*y[i]/n}this.w[0]-=this.hyperparams.learningRate*gw[0];this.w[1]-=this.hyperparams.learningRate*gw[1];this.b-=this.hyperparams.learningRate*gb}this.supportVectors=X.flatMap((x,i)=>y[i]*this.score(x)<=1.05?[{x:[...x],y:y[i]}]:[]);return this}
+  score(x){return dot(this.w,this.scaler.transform(x))+this.b}predict(x){return sign(this.score(x))}predictProba(x){return sigmoid(this.score(x))}*fitSteps(){yield this}
+}
+
+export class KernelSVM extends Model{
+  constructor(params={}){super('Kernel SVM','nonlinear','smooth',{C:4,gamma:1.2,maxIterations:2400},'Fits a binary RBF-kernel support vector machine with a deterministic simplified SMO solver. Similarity kernels let its boundary bend; large C or gamma can overfit.');this.setParams(params)}
+  fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.scaler=standardizer(X);this.Z=X.map(x=>this.scaler.transform(x));const n=X.length,C=this.hyperparams.C,gamma=this.hyperparams.gamma,alpha=Array(n).fill(0),K=Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>rbf(this.Z[i],this.Z[j],gamma)));let bias=0,passes=0,iterations=0,values=Array(n).fill(0);while(passes<8&&iterations<this.hyperparams.maxIterations){let changed=0;for(let i=0;i<n&&iterations<this.hyperparams.maxIterations;i++,iterations++){const Ei=values[i]-y[i];if(!((y[i]*Ei<-.001&&alpha[i]<C-EPS)||(y[i]*Ei>.001&&alpha[i]>EPS)))continue;let j=(i+1+Math.floor((i*1103515245+12345)%Math.max(n-1,1)))%n;if(j===i)j=(j+1)%n;const Ej=values[j]-y[j],ai=alpha[i],aj=alpha[j];let L,H;if(y[i]!==y[j]){L=Math.max(0,aj-ai);H=Math.min(C,C+aj-ai)}else{L=Math.max(0,ai+aj-C);H=Math.min(C,ai+aj)}if(H-L<EPS)continue;const eta=2*K[i][j]-K[i][i]-K[j][j];if(eta>=-EPS)continue;alpha[j]=aj-y[j]*(Ei-Ej)/eta;alpha[j]=Math.max(L,Math.min(H,alpha[j]));if(Math.abs(alpha[j]-aj)<1e-5){alpha[j]=aj;continue}alpha[i]=ai+y[i]*y[j]*(aj-alpha[j]);const b1=bias-Ei-y[i]*(alpha[i]-ai)*K[i][i]-y[j]*(alpha[j]-aj)*K[i][j];const b2=bias-Ej-y[i]*(alpha[i]-ai)*K[i][j]-y[j]*(alpha[j]-aj)*K[j][j];const oldBias=bias;bias=alpha[i]>EPS&&alpha[i]<C-EPS?b1:alpha[j]>EPS&&alpha[j]<C-EPS?b2:(b1+b2)/2;const deltaI=alpha[i]-ai,deltaJ=alpha[j]-aj,deltaB=bias-oldBias;for(let k=0;k<n;k++)values[k]+=y[i]*deltaI*K[i][k]+y[j]*deltaJ*K[j][k]+deltaB;changed++}passes=changed===0?passes+1:0}this.alpha=alpha;this.b=bias;this.supportVectors=X.flatMap((x,i)=>alpha[i]>1e-5?[{x:[...x],y:y[i],alpha:alpha[i]}]:[]);this.iterations=iterations;return this}
+  score(x){const z=this.scaler.transform(x);return this.alpha.reduce((sum,a,i)=>sum+(a>EPS?a*this.y[i]*rbf(z,this.Z[i],this.hyperparams.gamma):0),this.b)}predict(x){return sign(this.score(x))}predictProba(x){return sigmoid(this.score(x))}*fitSteps(){yield this}
+}
+function rbf(a,b,gamma){const d=(a[0]-b[0])**2+(a[1]-b[1])**2;return Math.exp(-gamma*d)}
+
+export class KNN extends Model{
+  constructor(params={}){super('k-NN','nonlinear','jagged',{k:7},'Stores the training points and asks the k nearest standardized neighbors to vote. Small k follows local detail and noise; large k smooths the boundary.');this.setParams(params)}
+  fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.scaler=standardizer(X);this.Z=X.map(x=>this.scaler.transform(x));this.k=Math.max(1,Math.min(this.hyperparams.k,X.length));this.supportVectors=[];return this}
+  neighborVotes(x){const z=this.scaler.transform(x),neighbors=this.Z.map((v,i)=>({d:(v[0]-z[0])**2+(v[1]-z[1])**2,index:i,y:this.y[i]})).sort((a,b)=>a.d-b.d||a.index-b.index).slice(0,this.k);return neighbors.reduce((s,n)=>s+n.y,0)}predict(x){return sign(this.neighborVotes(x))}predictProba(x){return(this.neighborVotes(x)/this.k+1)/2}*fitSteps(){yield this}
+}
+
+export class GaussianNaiveBayes extends Model{
+  constructor(params={}){super('Gaussian Naive Bayes','probabilistic','axis-aligned-quadratic',{varianceFloor:.015},'Fits a Gaussian to each feature within each class, with class priors, and multiplies the feature likelihoods. Its diagonal-covariance assumption ignores correlated features.');this.setParams(params)}
+  fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.classes=[-1,1].map(label=>{const rows=X.filter((_,i)=>y[i]===label),mean=[0,1].map(j=>rows.reduce((s,x)=>s+x[j],0)/Math.max(rows.length,1)),variance=[0,1].map(j=>rows.reduce((s,x)=>s+(x[j]-mean[j])**2,0)/Math.max(rows.length,1)+this.hyperparams.varianceFloor);return{label,mean,variance,prior:rows.length/Math.max(y.length,1)}});return this}
+  logScores(x){return this.classes.map(c=>Math.log(Math.max(c.prior,EPS))-.5*c.variance.reduce((sum,v,j)=>sum+Math.log(2*Math.PI*v)+(x[j]-c.mean[j])**2/v,0))}predict(x){const s=this.logScores(x);return s[1]>s[0]?1:-1}predictProba(x){const s=this.logScores(x),m=Math.max(...s),p=s.map(v=>Math.exp(v-m));return p[1]/(p[0]+p[1])}*fitSteps(){yield this}
+}
+
+export class LDA extends Model{
+  constructor(params={}){super('LDA','probabilistic','line',{ridge:.02},'Fits class means with one shared full covariance matrix and class priors. Its linear boundary uses feature correlation, unlike diagonal Naive Bayes; it struggles when classes have different covariance shapes.');this.setParams(params)}
+  fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.classes=[-1,1].map(label=>{const rows=X.filter((_,i)=>y[i]===label),mean=[0,1].map(j=>rows.reduce((s,x)=>s+x[j],0)/Math.max(rows.length,1));return{label,rows,mean,prior:rows.length/Math.max(y.length,1)}});const pooled=[[0,0],[0,0]];let denom=0;for(const c of this.classes){const cov=covariance(c.rows,c.mean,0),n=Math.max(c.rows.length-1,0);for(let i=0;i<2;i++)for(let j=0;j<2;j++)pooled[i][j]+=cov[i][j]*n;denom+=n}for(let i=0;i<2;i++)for(let j=0;j<2;j++)pooled[i][j]=pooled[i][j]/Math.max(denom,1)+(i===j?this.hyperparams.ridge:0);this.inv=inverse2(pooled);this.logDet=Math.log(Math.max(pooled[0][0]*pooled[1][1]-pooled[0][1]*pooled[1][0],EPS));return this}
+  logScores(x){return this.classes.map(c=>Math.log(Math.max(c.prior,EPS))-.5*quadratic(x,c.mean,this.inv)-.5*this.logDet)}predict(x){const s=this.logScores(x);return s[1]>s[0]?1:-1}predictProba(x){const s=this.logScores(x),m=Math.max(...s),p=s.map(v=>Math.exp(v-m));return p[1]/(p[0]+p[1])}*fitSteps(){yield this}
+}
+
+export class QDA extends Model{
+  constructor(params={}){super('QDA','probabilistic','quadratic',{ridge:.04},'Fits a separate full covariance matrix and prior for each class, producing a quadratic boundary. It handles unequal class shapes but can be unstable with small or outlier-heavy samples.');this.setParams(params)}
+  fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.classes=[-1,1].map(label=>{const rows=X.filter((_,i)=>y[i]===label),mean=[0,1].map(j=>rows.reduce((s,x)=>s+x[j],0)/Math.max(rows.length,1)),cov=covariance(rows,mean,this.hyperparams.ridge),det=Math.max(cov[0][0]*cov[1][1]-cov[0][1]*cov[1][0],EPS);return{label,mean,cov,inv:inverse2(cov),logDet:Math.log(det),prior:rows.length/Math.max(y.length,1)}});return this}
+  logScores(x){return this.classes.map(c=>Math.log(Math.max(c.prior,EPS))-.5*quadratic(x,c.mean,c.inv)-.5*c.logDet)}predict(x){const s=this.logScores(x);return s[1]>s[0]?1:-1}predictProba(x){const s=this.logScores(x),m=Math.max(...s),p=s.map(v=>Math.exp(v-m));return p[1]/(p[0]+p[1])}*fitSteps(){yield this}
+}
+
+function buildTree(X,y,ids,params,random,depth=0){const positives=ids.reduce((n,i)=>n+(y[i]===1),0),prob=positives/Math.max(ids.length,1);if(depth>=params.maxDepth||ids.length<params.minSamples||prob===0||prob===1)return{leaf:true,p:prob,label:prob>=.5?1:-1};let features=params.featureSubset?shuffle([0,1],random).slice(0,params.featureSubset):(params.features?shuffle([...params.features],random):[0,1]),best=null,bestImp=2;for(const feature of features){const values=[...new Set(ids.map(i=>X[i][feature]))].sort((a,b)=>a-b);const thresholds=values.slice(0,-1).map((v,i)=>(v+values[i+1])/2);for(const threshold of thresholds){const left=ids.filter(i=>X[i][feature]<=threshold),right=ids.filter(i=>X[i][feature]>threshold);if(left.length<params.minLeaf||right.length<params.minLeaf)continue;const gini=arr=>{const p=arr.reduce((n,i)=>n+(y[i]===1),0)/arr.length;return 2*p*(1-p)};const imp=(left.length*gini(left)+right.length*gini(right))/ids.length;if(imp<bestImp){bestImp=imp;best={feature,threshold,left,right}}}}if(!best)return{leaf:true,p:prob,label:prob>=.5?1:-1};return{leaf:false,...best,leftNode:buildTree(X,y,best.left,params,random,depth+1),rightNode:buildTree(X,y,best.right,params,random,depth+1)}}
+function treePredict(tree,x){let node=tree;while(!node.leaf)node=x[node.feature]<=node.threshold?node.leftNode:node.rightNode;return node}
+export class DecisionTree extends Model{
+  constructor(params={}){super('Decision Tree','tree','axis-aligned',{maxDepth:6,minSamples:3,minLeaf:1},'Greedily chooses Gini-reducing feature thresholds. The result is a set of axis-aligned boxes; deep trees can memorize noise and outliers.');this.setParams(params)}fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];this.tree=buildTree(this.X,this.y,this.X.map((_,i)=>i),this.hyperparams,rng(this.hyperparams.seed??31));this.splitCount=countSplits(this.tree);return this}predict(x){return treePredict(this.tree,x).label}predictProba(x){return treePredict(this.tree,x).p}*fitSteps(){yield this}}
+function countSplits(node){return node.leaf?0:1+countSplits(node.leftNode)+countSplits(node.rightNode)}
+export class RandomForest extends Model{
+  constructor(params={}){super('Random Forest','ensemble','blocky',{trees:25,maxDepth:5,minSamples:3,minLeaf:1},'Bootstraps many trees and samples one random feature at every split, then averages their fruit probabilities. Voting reduces the variance of one tree but cannot make the boundary smooth.');this.setParams(params)}fit(X,y,params=null){if(params)this.setParams(params);this.X=X.map(x=>[...x]);this.y=[...y];const random=rng(this.hyperparams.seed??47),featureCount=Math.max(1,Math.floor(Math.sqrt(X[0]?.length??2)));this.trees=Array.from({length:this.hyperparams.trees},()=>{const sample=X.map(()=>Math.floor(random()*X.length));return buildTree(X,y,sample,{...this.hyperparams,featureSubset:featureCount},random)});this.splitCount=this.trees.reduce((s,t)=>s+countSplits(t),0);return this}predictProba(x){return this.trees.reduce((s,t)=>s+treePredict(t,x).p,0)/Math.max(this.trees.length,1)}predict(x){return this.predictProba(x)>=.5?1:-1}*fitSteps(){yield this}}
+
+export const classifierNames=['Perceptron','Logistic Regression','Linear SVM','Kernel SVM','k-NN','Gaussian Naive Bayes','LDA','QDA','Decision Tree','Random Forest'];
+const constructors={Perceptron, 'Logistic Regression':LogisticRegression,'Linear SVM':LinearSVM,'Kernel SVM':KernelSVM,'k-NN':KNN,'Gaussian Naive Bayes':GaussianNaiveBayes,LDA,QDA,'Decision Tree':DecisionTree,'Random Forest':RandomForest};
+export const classifierInfo=Object.fromEntries(classifierNames.map(name=>{const model=new constructors[name]();const h=model.metadata.hyperparams;const formula=name==='Perceptron'?'w · x + b = 0':name==='Logistic Regression'?'p(y=1) = σ(w · x + b)':name.includes('SVM')?'max margin / kernel boundary':name==='k-NN'?'majority of k standardized neighbors':name.includes('Bayes')?'P(x|y) = ∏ P(xᵢ|y)':name==='LDA'?'shared full covariance':name==='QDA'?'class-specific covariance':'feature threshold rules';return[name,[model.metadata.boundaryShape,model.metadata.explanation,'May struggle when its assumptions do not fit the dataset.',formula]]}));
+export function createClassifier(name,params={},seed=31){const C=constructors[name]??Perceptron;return new C({...params,seed})}
+export function trainClassifier(name,data,params={},seed=31){return createClassifier(name,params,seed).fit(data.map(d=>d.x),data.map(d=>d.y),{...params,seed})}
+export function toyScore(name,kind,seed=29){const model=trainClassifier(name,makeData(kind,200,seed),{},seed);const test=makeData(kind,100,seed+62);return test.filter(p=>model.predict(p.x)===p.y).length/test.length}

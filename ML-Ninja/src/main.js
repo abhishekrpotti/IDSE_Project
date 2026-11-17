@@ -1,447 +1,110 @@
-import * as THREE from 'three';
-import { createSceneSetup } from './render/scene.js';
-import { createPostProcessing } from './render/postprocessing.js';
-import { BladeTrail } from './render/bladeTrail.js';
-import { BoundaryMesh } from './render/boundaryMesh.js';
-import { ParticleSystem } from './render/particles.js';
-
-import { PhysicsSystem } from './game/physics.js';
-import { SlicingController } from './game/slicing.js';
-import { Spawner } from './game/spawner.js';
-import { ScoringSystem } from './game/scoring.js';
-import { sounds } from './audio/soundEffects.js';
-
-import { CLASSIFIERS } from './classifiers/index.js';
-import { calculateMetrics } from './utils/metrics.js';
-
-import { HUD } from './ui/hud.js';
-import { LeftPanel } from './ui/leftPanel.js';
-import { RightPanel } from './ui/rightPanel.js';
-import { ChartPanels } from './ui/charts.js';
-import { BottomControls } from './ui/bottomControls.js';
-import { TooltipController } from './ui/tooltips.js';
-import { TutorialOverlay } from './ui/tutorial.js';
-
-class MLNinjaApp {
-  constructor() {
-    this.container = document.getElementById('canvas-container');
-    const { scene, camera, renderer, controls, toggleOrbit, handleResize } = createSceneSetup(this.container);
-    this.scene = scene;
-    this.camera = camera;
-    this.renderer = renderer;
-    this.controls = controls;
-    this.toggleOrbit = toggleOrbit;
-    this.handleResize = handleResize;
-
-    // Post processing for glowing trails
-    this.postProcessing = createPostProcessing(renderer, scene, camera);
-
-    // Systems
-    this.physics = new PhysicsSystem();
-    this.particles = new ParticleSystem(scene, 800);
-    this.bladeTrail = new BladeTrail(scene, 24);
-    this.boundaryMesh = new BoundaryMesh(scene);
-    this.scoring = new ScoringSystem();
-    this.slicing = new SlicingController(camera, 0);
-    this.spawner = new Spawner(scene, this.particles, sounds);
-
-    // State parameters
-    this.params = {
-      mode: 'FLOW', // FLOW, FREEZE, TRAIN, TEST, CHALLENGE
-      dataset: 'separable',
-      noise: 0.15,
-      showGrid: true,
-      classifier: 'perceptron',
-      lr: 0.1,
-      epochs: 50,
-      C: 1.0,
-      gamma: 0.6,
-      k: 5,
-      metric: 'euclidean',
-      maxDepth: 4,
-      nTrees: 6
-    };
-
-    // ML State
-    this.currentClassifier = null;
-    this.trainingGenerator = null;
-    this.isTrainingPlaying = false;
-    this.trainingSpeed = 20; // iterations per second
-    this.lastTrainingStepTime = 0;
-    this.trainingData = { X: [], y: [] };
-
-    // UI elements
-    this.hud = new HUD(document.body);
-    this.rightPanel = new RightPanel(document.body);
-    this.charts = new ChartPanels(document.body);
-    this.tooltips = new TooltipController(document.body);
-    this.bottomControls = new BottomControls(document.body, {
-      onTogglePlay: (playing) => { this.isTrainingPlaying = playing; },
-      onStep: () => { this.stepTraining(); },
-      onReset: () => { this.resetTraining(); },
-      onSpeedChange: (speed) => { this.trainingSpeed = speed; }
-    });
-
-    this.leftPanel = new LeftPanel(
-      document.getElementById('left-gui-container'),
-      this.params,
-      {
-        onModeChange: (m) => this.setMode(m),
-        onDatasetChange: (d) => this.changeDataset(d),
-        onClassifierChange: (c) => this.changeClassifier(c),
-        onToggleGrid: (show) => this.boundaryMesh.setVisible(show),
-        onAction: (act) => this.handleAction(act)
-      }
-    );
-
-    // Tutorial overlay
-    this.tutorial = new TutorialOverlay(document.body, () => {
-      sounds.playClick();
-    });
-
-    this.initClassifier();
-    this.bindEvents();
-    this.lastTime = performance.now();
-    this.animate = this.animate.bind(this);
-    requestAnimationFrame(this.animate);
-  }
-
-  initClassifier() {
-    const config = CLASSIFIERS[this.params.classifier];
-    if (!config) return;
-    this.currentClassifier = new config.Class({
-      lr: this.params.lr,
-      epochs: this.params.epochs,
-      C: this.params.C,
-      gamma: this.params.gamma,
-      k: this.params.k,
-      metric: this.params.metric,
-      maxDepth: this.params.maxDepth,
-      nTrees: this.params.nTrees
-    });
-    this.rightPanel.setClassifier(this.params.classifier);
-  }
-
-  setMode(mode) {
-    this.params.mode = mode;
-    this.hud.update({ mode });
-
-    if (mode === 'FLOW') {
-      this.boundaryMesh.clearOverlay();
-    } else if (mode === 'FREEZE') {
-      sounds.playFreeze();
-      this.gatherFrozenTrainingData();
-    } else if (mode === 'TRAIN') {
-      this.startTraining();
-    } else if (mode === 'TEST') {
-      // Clear frozen objects and throw new ones to test
-      this.spawner.clearAll();
-      sounds.playSuccess();
-    } else if (mode === 'CHALLENGE') {
-      sounds.playClick();
-    }
-  }
-
-  gatherFrozenTrainingData() {
-    // Collect dataset from active objects or spawner's dataset
-    if (this.spawner.activeObjects.length >= 8) {
-      this.trainingData.X = this.spawner.activeObjects.map(o => [o.position.x, o.position.y]);
-      this.trainingData.y = this.spawner.activeObjects.map(o => o.userData.label);
-    } else {
-      // Use dataset generator points
-      this.trainingData.X = [...this.spawner.dataset.X];
-      this.trainingData.y = [...this.spawner.dataset.y];
-      // Spawn them all frozen
-      this.spawner.clearAll();
-      for (let i = 0; i < this.trainingData.X.length; i++) {
-        const pt = this.trainingData.X[i];
-        const lbl = this.trainingData.y[i];
-        const obj = this.spawner.spawnSinglePoint(pt[0], pt[1], lbl);
-        obj.position.set(pt[0], pt[1], 0);
-        obj.userData.physics.isFrozen = true;
-      }
-    }
-  }
-
-  startTraining() {
-    this.gatherFrozenTrainingData();
-    this.initClassifier();
-    this.charts.reset();
-    this.trainingGenerator = this.currentClassifier.fitSteps(this.trainingData.X, this.trainingData.y);
-    this.isTrainingPlaying = true;
-    this.bottomControls.setPlaying(true);
-  }
-
-  stepTraining() {
-    if (!this.trainingGenerator) {
-      this.startTraining();
-    }
-    const result = this.trainingGenerator.next();
-    if (result.done) {
-      this.isTrainingPlaying = false;
-      this.bottomControls.setPlaying(false);
-      sounds.playSuccess();
-      return false;
-    }
-
-    const stepData = result.value;
-    this.rightPanel.updateStepInfo(stepData);
-
-    // Update boundary texture & overlays
-    this.boundaryMesh.updateFromModel(this.currentClassifier);
-
-    if (stepData.supportVectorIndices) {
-      this.boundaryMesh.renderSupportVectors(this.trainingData.X, stepData.supportVectorIndices);
-    } else if (stepData.splits) {
-      this.boundaryMesh.renderTreeSplits(stepData.splits);
-    }
-
-    // Update metrics and chart
-    if (stepData.accuracy !== undefined) {
-      this.hud.update({ accuracy: stepData.accuracy });
-      this.charts.updateMetrics(stepData.accuracy, stepData.loss, stepData.step);
-    }
-
-    // Compute confusion matrix
-    const preds = this.trainingData.X.map(x => this.currentClassifier.predict(x));
-    const metrics = calculateMetrics(this.trainingData.y, preds);
-    this.charts.updateConfusionMatrix(metrics.confusionMatrix);
-
-    return true;
-  }
-
-  resetTraining() {
-    this.isTrainingPlaying = false;
-    this.bottomControls.setPlaying(false);
-    this.initClassifier();
-    this.charts.reset();
-    this.boundaryMesh.clearOverlay();
-    this.boundaryMesh.updateFromModel(this.currentClassifier);
-  }
-
-  changeDataset(datasetType) {
-    this.params.dataset = datasetType;
-    this.spawner.loadDataset(datasetType, { noise: this.params.noise });
-    this.spawner.clearAll();
-    this.resetTraining();
-    sounds.playClick();
-  }
-
-  changeClassifier(classifierId) {
-    this.params.classifier = classifierId;
-    this.initClassifier();
-    this.resetTraining();
-    sounds.playClick();
-  }
-
-  handleAction(action) {
-    switch (action) {
-      case 'freeze':
-        this.setMode(this.params.mode === 'FREEZE' ? 'FLOW' : 'FREEZE');
-        break;
-      case 'train':
-        this.setMode('TRAIN');
-        break;
-      case 'test':
-        this.setMode('TEST');
-        break;
-      case 'challenge':
-        this.setMode('CHALLENGE');
-        break;
-      case 'orbit': {
-        const isOrbit = this.toggleOrbit();
-        break;
-      }
-      case 'reset':
-        this.scoring.reset();
-        this.hud.update({ score: 0, lives: 3, combo: 0, accuracy: null, playerAccuracy: null });
-        this.spawner.clearAll();
-        this.resetTraining();
-        this.setMode('FLOW');
-        sounds.playClick();
-        break;
-    }
-  }
-
-  bindEvents() {
-    const dom = this.container;
-
-    // Mouse / Touch Slicing
-    dom.addEventListener('pointerdown', (e) => {
-      if (this.controls.enabled) return;
-      this.slicing.startSlash(e.clientX, e.clientY);
-      this.bladeTrail.addPoint(this.slicing.currentWorldPos);
-    });
-
-    dom.addEventListener('pointermove', (e) => {
-      if (this.controls.enabled) return;
-      this.slicing.moveSlash(e.clientX, e.clientY);
-      if (this.slicing.isPointerDown) {
-        this.bladeTrail.addPoint(this.slicing.currentWorldPos);
-      }
-
-      // Tooltip inspect on hover
-      this.checkHoverTooltip(e.clientX, e.clientY);
-    });
-
-    window.addEventListener('pointerup', () => {
-      this.slicing.endSlash();
-      // If player drew a boundary slash, evaluate it!
-      if (this.slicing.lastSlashBoundary) {
-        const { w, b } = this.slicing.lastSlashBoundary;
-        const targetPts = this.spawner.activeObjects.length > 0
-          ? this.spawner.activeObjects
-          : this.trainingData.X.map((pt, i) => ({ position: { x: pt[0], y: pt[1] }, userData: { label: this.trainingData.y[i] } }));
-
-        const playerAcc = this.scoring.evaluatePlayerLine(w, b, targetPts);
-        this.hud.update({ playerAccuracy: playerAcc });
-        sounds.playClick();
-      }
-    });
-
-    // Sound toggle button in HUD
-    this.hud.soundBtn.addEventListener('click', () => {
-      const isMuted = sounds.toggleMute();
-      this.hud.soundBtn.textContent = isMuted ? '🔇' : '🔊';
-    });
-
-    // Keyboard Shortcuts
-    window.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT') return;
-      const key = e.key.toUpperCase();
-
-      if (key === ' ') {
-        e.preventDefault();
-        this.handleAction('freeze');
-      } else if (key === 'T') {
-        this.handleAction('train');
-      } else if (key === 'R') {
-        this.handleAction('reset');
-      } else if (key === 'O') {
-        this.handleAction('orbit');
-      } else if (key === 'D') {
-        // Cycle dataset
-        const datasets = ['separable', 'overlapping', 'xor', 'moons', 'circles', 'spirals'];
-        const nextIdx = (datasets.indexOf(this.params.dataset) + 1) % datasets.length;
-        this.changeDataset(datasets[nextIdx]);
-      } else if (key >= '1' && key <= '9') {
-        const keys = Object.keys(CLASSIFIERS);
-        const idx = parseInt(key, 10) - 1;
-        if (keys[idx]) {
-          this.changeClassifier(keys[idx]);
-        }
-      }
-    });
-  }
-
-  checkHoverTooltip(clientX, clientY) {
-    const worldPos = this.slicing.getPointerWorldPos(clientX, clientY);
-    let hovered = null;
-
-    for (const obj of this.spawner.activeObjects) {
-      if (obj.position.distanceTo(worldPos) < 0.6) {
-        hovered = obj;
-        break;
-      }
-    }
-
-    if (hovered) {
-      let predictedLabel, confidence;
-      if (this.currentClassifier && this.currentClassifier.isFitted) {
-        predictedLabel = this.currentClassifier.predict([hovered.position.x, hovered.position.y]);
-        confidence = this.currentClassifier.predictProba([hovered.position.x, hovered.position.y]);
-        if (predictedLabel < 0) confidence = 1.0 - confidence;
-      }
-      this.tooltips.show(clientX, clientY, {
-        type: hovered.userData.type,
-        x: hovered.position.x,
-        y: hovered.position.y,
-        predictedLabel,
-        confidence
-      });
-    } else {
-      this.tooltips.hide();
-    }
-  }
-
-  animate(currentTime) {
-    requestAnimationFrame(this.animate);
-
-    const dt = Math.min(0.05, (currentTime - this.lastTime) / 1000);
-    this.lastTime = currentTime;
-
-    const isFrozen = this.params.mode === 'FREEZE' || this.params.mode === 'TRAIN';
-
-    // Training step loop
-    if (this.isTrainingPlaying) {
-      const interval = 1000 / this.trainingSpeed;
-      if (currentTime - this.lastTrainingStepTime >= interval) {
-        this.lastTrainingStepTime = currentTime;
-        this.stepTraining();
-      }
-    }
-
-    // Slicing logic
-    if (this.slicing.isPointerDown && !this.controls.enabled) {
-      const slicedHits = this.slicing.sliceCheck(this.spawner.activeObjects);
-      for (const hit of slicedHits) {
-        const res = this.spawner.sliceObject(hit.target, hit.cutNormal);
-        if (res) {
-          if (res.isFruit) {
-            const { points, combo } = this.scoring.onFruitSliced();
-            this.hud.update({ score: this.scoring.score, combo });
-          } else {
-            const { lives, isGameOver } = this.scoring.onBombHit();
-            this.hud.update({ lives, combo: 0 });
-          }
-        }
-      }
-    }
-
-    // Auto-slice check in TEST mode
-    if (this.params.mode === 'TEST') {
-      for (const obj of this.spawner.activeObjects) {
-        if (obj.userData.autoSliced && !obj.userData.isSliced) {
-          const res = this.spawner.sliceObject(obj, new THREE.Vector3(1, 0, 0));
-          if (res) {
-            if (res.isFruit) {
-              const { points, combo } = this.scoring.onFruitSliced();
-              this.hud.update({ score: this.scoring.score, combo });
-            } else {
-              // Model misclassified a bomb as a fruit and sliced it!
-              const { lives } = this.scoring.onBombHit();
-              this.hud.update({ lives, combo: 0 });
-            }
-          }
-        }
-      }
-    }
-
-    // Update systems
-    this.spawner.update(dt, isFrozen, this.params.mode, this.currentClassifier);
-
-    for (const obj of this.spawner.activeObjects) {
-      this.physics.updateObject(obj, dt);
-    }
-    for (const half of this.spawner.activeHalves) {
-      this.physics.updateHalf(half, dt);
-    }
-
-    this.particles.update(dt);
-    this.bladeTrail.update();
-    this.scoring.update(dt);
-
-    if (this.controls.enabled) {
-      this.controls.update();
-    }
-
-    // Render with bloom postprocessing
-    this.postProcessing.composer.render();
-  }
+import * as THREE from 'three';import {gsap} from 'gsap';import {createScene} from './render/scene.js';import {theme} from './theme.js';import {WAVE_SIZE,DRAW_TIME} from './config.js';import {datasets,datasetInfo,waveData} from './data/generators.js';import {classifierNames,createClassifier,classifierInfo} from './classifiers/index.js';import {finalizeRound,createRoundStats,recordRoundHit} from './game/roundStats.js';import {linearBoundaryClass,freehandBoundaryClass} from './game/boundary.js';import {StateMachine,states} from './game/stateMachine.js';import {sound} from './audio.js';import {drawConfusion} from './ui/miniCharts.js';import {drawResultGraph} from './ui/resultGraph.js';import './ui/styles.css';import {openGameGuide,shouldShowGameGuide} from './ui/onboarding.js';
+const app=document.querySelector('#app');app.innerHTML=`<div class="canvas-wrap"><canvas id="scene"></canvas></div><button class="drawer-toggle lab-toggle" id="toggleLab" aria-expanded="false" aria-controls="labPanel">Lab</button><button class="drawer-toggle how-toggle" id="toggleHow" aria-expanded="false" aria-controls="howPanel" aria-label="How it works">How it works</button><header class="topbar"><div class="brand">🍉 ML NINJA</div><button id="guideButton" class="guide-open" type="button" aria-label="Open the ML Ninja guide">📘 Guide</button><div class="chip">⭐ <span id="score">0</span></div><div class="chip">🔥 <span id="streak">0</span></div><div class="chip" id="modelTag">Perceptron</div></header><div class="layout"><aside class="card left" id="labPanel"><h3>🧠 Your lab</h3>
+<details class="panel-section" open><summary>Model</summary><label for="classifier">Classifier</label><select id="classifier">${classifierNames.map(n=>`<option>${n}</option>`).join('')}</select><div id="hyperControls"></div><p id="classifierExplanation" class="panel-copy"></p><label for="challengeMode">Challenge mode</label><select id="challengeMode"><option>Practice</option><option>Pick the model</option><option>Mystery model</option></select><button id="lessonButton" class="full-button">🎓 Guided lesson</button></details>
+<details class="panel-section" open><summary>Data</summary><label for="dataset">Dataset</label><select id="dataset">${datasets.map(n=>`<option>${n}</option>`).join('')}</select><div class="lab-explain"><b>About this dataset</b><p id="datasetExplanation"></p><b>Dataset size</b><p id="datasetItemCount"></p></div><b class="panel-subtitle">Boundary style</b><p id="styleNote" class="panel-copy">Draw a straight line through the scatter.</p></details>
+<details class="panel-section"><summary>Display</summary><label class="check-label"><input id="colorblindMode" type="checkbox"> Colorblind palette</label><label class="check-label"><input id="reducedMotion" type="checkbox"> Reduce motion</label><button id="lowQuality" class="full-button">⚙ Low quality: off</button></details>
+<details class="panel-section"><summary>Wave settings</summary><label for="waveSize">Points in each wave</label><input id="waveSize" type="range" min="8" max="24" step="2" value="12" aria-label="Points in each wave"><div class="range-readout"><span id="waveSizeValue">12</span> points</div><label for="noise">Feature noise</label><input id="noise" type="range" min="0" max="0.5" step="0.05" value="0.2"><div class="range-readout"><span id="noiseValue">0.20</span></div><label for="labelNoise">Label flips</label><input id="labelNoise" type="range" min="0" max="0.5" step="0.05" value="0"><div class="range-readout"><span id="labelNoiseValue">0%</span></div></details>
+<small class="panel-footnote">Keys 1–9 choose a classifier<br>D changes the dataset</small></aside><aside class="card right" id="howPanel"><h3>💡 How it works</h3><b id="howTitle">A simple linear separator</b><p id="howText">Updates its line when it makes a mistake.</p><div class="formula" id="formula">w · x + b = 0</div><section class="logistic-lesson" id="logisticLesson" hidden><h4>How logistic regression decides</h4><p><b>1. Look at the clues.</b> Each point has two features. The model learns how much each clue matters for deciding fruit or bomb.</p><p><b>2. Estimate a chance.</b> It adds the clues into an internal score, then turns that score into a fruit probability from 0% to 100%.</p><p><b>3. Make a choice.</b> At 50% it draws the decision line: above that, predict fruit; below it, predict bomb.</p><canvas id="logisticPlot" width="280" height="160" aria-label="Logistic regression probability curve with fruit and bomb examples"></canvas><small>The curve shows how the model changes its fruit estimate. Green dots are fruit examples; coral dots are bomb examples. The dashed line marks the 50% cutoff.</small></section><section class="knn-lesson" id="knnLesson" hidden><h4>k-Nearest Neighbors: nearby points vote</h4><p><b>Feature:</b> one of a point’s coordinates. <b>Training data:</b> known fruit and bomb examples the model remembers.</p><p><b>k:</b> how many nearby examples get a vote. Small k follows local detail; large k smooths the boundary. Current k: <strong id="knnKValue">7</strong>.</p><p><b>Distance:</b> this game uses Euclidean (straight-line) distance after scaling both features to comparable ranges. Manhattan distance adds coordinate differences, like moving along city blocks; it is an alternative, not a setting in this game.</p><p><b>Majority vote:</b> the most common label among the k neighbors becomes the prediction. The plotted regions show which label wins at each location.</p></section><canvas id="previewGraph" width="180" height="130" aria-label="Live preview of the selected classifier and dataset"></canvas><small>Live classifier preview · updates with your settings</small><section class="learning-note"><h4>🧠 Classifier idea</h4><p id="modelLesson">How the selected model learns and makes decisions.</p><h4>🧪 Dataset pattern</h4><p id="datasetLesson">What makes this dataset distinctive.</p><h4>🔎 Try this</h4><p id="experimentTip">Compare models to see how their boundaries differ.</p></section><section class="kernel-lesson" id="kernelLesson" hidden><h4>Kernel SVM: the key ideas</h4><p><b>Feature:</b> a point’s two coordinates. <b>Class:</b> fruit (+1) or bomb (−1).</p><p><b>Decision boundary:</b> the curve separating the predicted classes. <b>Support vectors:</b> influential training points near that boundary.</p><p><b>Maximum margin:</b> SVM seeks the widest safe gap between classes. In the transformed feature space, its separator is a hyperplane; mapped back to this graph, it can curve.</p><p><b>Margin and hinge loss:</b> the margin is the buffer around the separator. Hinge loss penalizes wrong guesses and points inside that buffer. The dashed curves show the ±1 score margins.</p><p><b>Kernel trick:</b> compare points by similarity without explicitly building the higher-dimensional space. <b>RBF:</b> nearby points influence each other most; gamma sets how local that influence is.</p><p><b>C:</b> sets how strongly training errors are penalized. High C pushes harder to fit training examples; high gamma can make a wiggly, overfit boundary.</p><small><b>Kernel choices:</b> Linear makes a straight boundary; RBF makes flexible curves (used here); Polynomial models feature combinations; Sigmoid gives sigmoid-shaped similarity. This game currently implements RBF only.</small></section><p><b>When it struggles</b></p><p id="fails">Fails when classes cannot be split by one straight line.</p></aside></div><div class="message" id="message">Ready? Press start and meet your data.</div><div class="countdown" id="timer" hidden><svg viewBox="0 0 60 60" width="68" height="68"><circle cx="30" cy="30" r="26"/><circle class="progress" cx="30" cy="30" r="26"/></svg><b id="seconds">10</b></div><div class="hud"><button class="primary" id="start">🍓 Start wave <small>(Space)</small></button><button id="submit" hidden>Submit ↵</button><button id="sliceMode" hidden>🔪 Slice mode</button><button id="sound">🔊 Sound on</button></div><div class="corner">Fruit = +1 class · Bomb = −1 class · Draw the boundary that separates them</div><div id="modal"></div>`;
+const canvas=document.querySelector('#scene'),view=createScene(canvas),machine=new StateMachine(renderState);let classifier='Perceptron',dataset='Separable blobs',points=[],trainingExamples=[],waveSeed=0,waveSize=WAVE_SIZE,trainSize=100,noise=.2,labelNoise=0,roundStats=createRoundStats(),playerLine=null,strokes=[],drawing=false,waveTransform=null,score=0,streak=0,low=false,muted=false,launchAt=0,drawEnd=0,models=[],apex=false,modelParams={},challengeMode='Practice',challengeGuess=null,mysteryName=null,lessonIndex=0;const raycaster=new THREE.Raycaster();let sliceGesture=false,lastSlicePointer=null;let sliceMode=false;let audioCtx,perfStart=0,perfFrames=0,perfSlowStart=0;let sharedSeed=null;try{if(location.hash.startsWith('#challenge=')){const challenge=JSON.parse(decodeURIComponent(location.hash.slice(11)));classifier=challenge.classifier??classifier;dataset=challenge.dataset??dataset;modelParams={...(challenge.params??{})};delete modelParams.epochs;sharedSeed=challenge.seed??null;document.querySelector('#classifier').value=classifier;document.querySelector('#dataset').value=dataset;if(challenge.waveSize)document.querySelector('#waveSize').value=challenge.waveSize;if(challenge.noise!==undefined)document.querySelector('#noise').value=challenge.noise;if(challenge.labelNoise!==undefined)document.querySelector('#labelNoise').value=challenge.labelNoise}}catch{}
+function say(text){document.querySelector('#message').textContent=text}function updateInfo(){const info=classifierInfo[classifier];const meta=createClassifier(classifier).metadata;const specs={k:['k',1,31,2,'Number of neighbors voting on a label.'],maxDepth:['max depth',1,12,1,'Maximum tree depth; deeper trees can memorize noise.'],trees:['trees',5,75,5,'Number of bootstrapped trees whose votes are averaged.'],C:['C',.1,10,.1,'Penalty strength for margin violations.'],gamma:['gamma',.1,4,.1,'RBF similarity scale; larger values make smaller, curvier regions.'],learningRate:['learning rate',.005,.2,.005,'Step size used by gradient or mistake updates.'],ridge:['ridge',.005,.2,.005,'Stability regularization added to covariance estimates.'],varianceFloor:['variance floor',.005,.1,.005,'Minimum class variance to keep likelihoods stable.']};const defaults=meta.hyperparams;document.querySelector('#hyperControls').innerHTML=Object.entries(defaults).filter(([key])=>specs[key]).map(([key,value])=>{const [label,min,max,step,title]=specs[key];const current=modelParams[key]??value;return `<label title="${title}">${label}: <span>${current}</span></label><input data-param="${key}" title="${title}" type="range" min="${min}" max="${max}" step="${step}" value="${current}">`}).join('');document.querySelectorAll('#hyperControls input').forEach(input=>input.oninput=()=>{modelParams[input.dataset.param]=Number(input.value);input.previousElementSibling.querySelector('span').textContent=input.value;if(input.dataset.param==='k')document.querySelector('#knnKValue').textContent=input.value;refreshModelPreview()});document.querySelector('#classifierExplanation').textContent=`${info[1]} ${info[2]}`;document.querySelector('#datasetExplanation').textContent=datasetInfo[dataset];const nextSize=Number(document.querySelector('#waveSize').value);trainSize=100;noise=Number(document.querySelector('#noise').value);labelNoise=Number(document.querySelector('#labelNoise').value);document.querySelector('#waveSizeValue').textContent=nextSize;document.querySelector('#noiseValue').textContent=noise.toFixed(2);document.querySelector('#labelNoiseValue').textContent=`${Math.round(labelNoise*100)}%`;const preview=waveData(dataset,nextSize,321,{noise,labelNoise});document.querySelector('#datasetItemCount').textContent=`Next wave: ${nextSize} points — ${preview.filter(p=>p.y===1).length} fruit and ${preview.filter(p=>p.y===-1).length} bombs.`;document.querySelector('#modelTag').textContent=classifier;document.querySelector('#howTitle').textContent=`${classifier} · ${info[0]} boundary`;document.querySelector('#howText').textContent=classifier==='Logistic Regression'?'Learns how strongly each clue points toward fruit or bomb, then estimates a fruit chance.':info[1];document.querySelector('#fails').textContent=info[2];document.querySelector('#kernelLesson').hidden=classifier!=='Kernel SVM';document.querySelector('#knnLesson').hidden=classifier!=='k-NN';document.querySelector('#knnKValue').textContent=modelParams.k??meta.hyperparams.k;document.querySelector('#formula').textContent=classifier==='Logistic Regression'?'Clues → score → chance of fruit':info[3];
+const modelLessons={'Perceptron':'It starts with a straight line and nudges its weights only after a mistake. On overlapping data it can keep moving instead of settling on one best fit.','Logistic Regression':'It learns how much each clue matters, combines the clues, and estimates the chance that a point is fruit. It draws a straight decision line at a 50% fruit chance.','Linear SVM':'It places a line to leave the widest gap between classes. Points nearest the gap (support vectors) matter most; the boundary is still linear.','Kernel SVM':'An RBF kernel compares points by distance and lets the margin bend around clusters. C controls tolerance for mistakes; gamma controls how local the curve can become.','k-NN':'It stores examples instead of fitting one equation. Nearby training points vote; a small k makes a detailed boundary, while a larger k smooths it.','Gaussian Naive Bayes':'It estimates a bell-shaped distribution for each feature in each class, then combines their likelihoods. It assumes the features are independent once the class is known.','LDA':'It estimates a center for each class and one shared full covariance matrix. The shared covariance makes the boundary linear while still accounting for feature correlation.','QDA':'It estimates a separate full covariance matrix for each class. The boundary can curve to match different spreads, but small samples make those estimates noisy.','Decision Tree':'It repeatedly splits one feature at a threshold to reduce Gini impurity. The resulting rectangles are easy to inspect but can memorize noise when the tree is deep.','Random Forest':'It averages votes from bootstrapped trees that consider random features at each split. Averaging stabilizes individual trees while keeping a block-shaped boundary.'};
+const datasetLessons={'Separable blobs':'Two compact groups have a clean gap. A straight line should generalize well, so compare the linear models before choosing a more flexible one.','Overlapping blobs':'Some examples sit in a shared region, so even a well-fit model will make mistakes. Try more training points, then add label flips to see how noise changes the boundary.','XOR':'Each class occupies alternating corners. A straight line cannot separate the labels; compare a linear model with an RBF kernel or tree.','Two moons':'The classes wrap around each other. Watch whether a smooth kernel or local neighbors follow the curved gap without making a jagged fit.','Circles':'One class surrounds the other. Look for a closed region; a single straight line cannot put the center inside while leaving the ring outside.','Spirals':'The classes twist around one another several times. Compare a local model with a linear model and adjust gamma or k to see how much detail each can follow.','Correlated blobs':'The clouds are tilted. LDA uses their shared feature correlation; diagonal Naive Bayes ignores it, which can shift its separating line.','Unequal-variance blobs':'One group is tighter than the other. Compare LDA’s shared-shape assumption with QDA’s separate covariance estimates.','Outlier blobs':'A few mislabeled points sit away from their groups. Compare Perceptron and small-k neighbors with regularized logistic regression or SVM.','Checkerboard (3x3)':'The labels alternate across axis-aligned squares. Trees can express these box-shaped rules; linear models cannot.'};
+const experiments={'Correlated blobs':'Select LDA, then Gaussian Naive Bayes. Compare how the two boundaries treat the same tilted clouds.','Unequal-variance blobs':'Switch between LDA and QDA to see the effect of giving each class its own covariance.','XOR':'Compare Perceptron with Kernel SVM; the data do not have one straight separating line.','Two moons':'Compare k-NN at small and large k, then compare its local boundary with the Kernel SVM curve.','Spirals':'Adjust gamma for Kernel SVM or k for k-NN, then use Compare all to see which regions change.','Outlier blobs':'Raise the label-flip setting and compare Perceptron with a regularized model.','Checkerboard (3x3)':'Compare Decision Tree and Random Forest with a linear model; inspect their box-shaped regions.'};
+document.querySelector('#modelLesson').textContent=modelLessons[classifier]??info[1];document.querySelector('#datasetLesson').textContent=datasetLessons[dataset]??datasetInfo[dataset];document.querySelector('#experimentTip').textContent=experiments[dataset]??`Keep ${dataset} selected and compare ${classifier} with another model using Compare all after a round.`;const linear=['Perceptron','Logistic Regression','Linear SVM'].includes(classifier);document.querySelector('#styleNote').textContent=linear?'Draw a straight line through the scatter.':'Draw a curved line to split the scatter, or close the stroke to mark an inside region.';refreshModelPreview()}function drawLogisticPlot(canvas,model,training){if(!canvas||!model?.w||!model?.scaler)return;const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,left=36,right=w-12,top=12,bottom=116;ctx.clearRect(0,0,w,h);ctx.font='11px system-ui';ctx.fillStyle='#4d5067';ctx.strokeStyle='#aaa6b4';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(left,top);ctx.lineTo(left,bottom);ctx.lineTo(right,bottom);ctx.stroke();for(const probability of [0,.5,1]){const y=bottom-probability*(bottom-top);ctx.fillText(`${Math.round(probability*100)}%`,2,y+4);ctx.strokeStyle=probability===.5?'#757086':'#e2deea';ctx.setLineDash(probability===.5?[4,3]:[]);ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke()}ctx.setLineDash([]);ctx.fillStyle='#4d5067';ctx.fillText('Evidence for bomb',left,h-6);ctx.fillText('Evidence for fruit',right-91,h-6);ctx.strokeStyle='#48a889';ctx.lineWidth=3;ctx.beginPath();for(let i=0;i<=120;i++){const z=-6+12*i/120,p=1/(1+Math.exp(-z)),x=left+(right-left)*i/120,y=bottom-p*(bottom-top);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)}ctx.stroke();for(const point of (training??[]).filter((_,i)=>i%6===0)){const z=Math.max(-6,Math.min(6,model.score(point.x))),probability=model.predictProba(point.x),x=left+(z+6)/12*(right-left),y=bottom-probability*(bottom-top);ctx.beginPath();ctx.arc(x,y,3.4,0,Math.PI*2);ctx.fillStyle=point.y===1?'#369b78':'#d56f78';ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.stroke()}}
+function updateLogisticLesson(model,training){const lesson=document.querySelector('#logisticLesson');if(!lesson)return;lesson.hidden=classifier!=='Logistic Regression';if(!lesson.hidden)drawLogisticPlot(document.querySelector('#logisticPlot'),model,training)}
+function refreshModelPreview(){const canvas=document.querySelector('#previewGraph');if(!canvas)return;const training=waveData(dataset,trainSize,189,{noise,labelNoise}),preview=waveData(dataset,22,891,{noise,labelNoise}),model=createClassifier(classifier,modelParams,189).fit(training.map(p=>p.x),training.map(p=>p.y));updateLogisticLesson(model,training);const size=28,modelPredictionGrid=Array.from({length:size},(_,row)=>Array.from({length:size},(_,col)=>model.predict([col/(size-1)*4-2,2-row/(size-1)*4])));drawResultGraph(canvas,{modelPredictionGrid,points:preview,userBoundary:null})}function renderState(s){document.querySelector('#start').hidden=![states.IDLE,states.RESULT].includes(s);document.querySelector('#submit').hidden=s!==states.DRAW;document.querySelector('#sliceMode').hidden=s!==states.DRAW;document.querySelector('#timer').hidden=s!==states.DRAW;if(s===states.DRAW){sliceMode=false;document.querySelector('#sliceMode').textContent='🔪 Slice mode';say(`Draw your boundary, or switch to Slice mode. ${DRAW_TIME} seconds!`)}view.render()}
+function createDisplayTransform(sample){const rect=canvas.getBoundingClientRect(),aspect=rect.width/Math.max(rect.height,1);const xs=sample.map(p=>p.x[0]),ys=sample.map(p=>p.x[1]);const cx=(Math.min(...xs)+Math.max(...xs))/2,cy=(Math.min(...ys)+Math.max(...ys))/2;const halfX=Math.max(...xs.map(x=>Math.abs(x-cx)),.12),halfY=Math.max(...ys.map(y=>Math.abs(y-cy)),.12);const scale=Math.max(.2,Math.min(aspect*3.2*.72/halfX,3.2*.72/halfY));return{cx,cy,sx:scale,sy:scale}}function toDisplayPoint(x,transform=waveTransform){return{x:(x[0]-transform.cx)*transform.sx,y:(x[1]-transform.cy)*transform.sy}}function mapPoint(p){return toDisplayPoint(p.x)}function startWave(retry=false,fromPrompt=false){if(!retry&&!fromPrompt&&machine.is(states.RESULT))challengeGuess=null;if(challengeMode==='Pick the model'&&!retry&&!fromPrompt&&!challengeGuess){showPickChallenge();return}roundStats=createRoundStats();document.querySelector('#modal').innerHTML='';classifier=document.querySelector('#classifier').value;dataset=document.querySelector('#dataset').value;waveSize=Number(document.querySelector('#waveSize').value);updateInfo();if(!retry){waveSeed=sharedSeed??Math.floor(Math.random()*1e6);sharedSeed=null;}points=waveData(dataset,waveSize,waveSeed,{noise,labelNoise});waveTransform=createDisplayTransform(points);document.querySelector('#datasetItemCount').textContent=`This wave: ${waveSize} points — ${points.filter(p=>p.y===1).length} fruit and ${points.filter(p=>p.y===-1).length} bombs.`;const training=waveData(dataset,trainSize,189,{noise,labelNoise});trainingExamples=training;const model=createClassifier(classifier,modelParams,waveSeed);model.fit(training.map(p=>p.x),training.map(p=>p.y));models=model;strokes=[];playerLine=null;view.objects.splice(0).forEach(o=>{view.scene.remove(o)});const launchStart=performance.now();const g=2.5,T=1.45;points.forEach((p,i)=>{const obj=view.makeFruit(p,i),target=mapPoint(p),delay=(i%4)*.04,Tp=T-delay,startX=-4.2+Math.random()*8.4,startY=target.y-.5*g*Tp*Tp;obj.position.set(startX,startY,0);obj.userData.flight={startX,startY,targetX:target.x,targetY:target.y,start:launchStart+delay*1000,T:Tp,g};obj.userData.apex=false});launchAt=launchStart+T*1000;apex=false;machine.go(states.LAUNCH);say('Wave incoming — watch the data fly!');requestAnimationFrame(tick)}
+function tick(now){if(!perfStart)perfStart=now;perfFrames++;if(now-perfStart>1000){const fps=perfFrames*1000/(now-perfStart);if(fps<45){if(!perfSlowStart)perfSlowStart=now;if(now-perfSlowStart>2000&&!low){low=true;document.querySelector('#lowQuality').textContent='⚙ Low quality: on';view.renderer.setPixelRatio(1);view.resize()}}else perfSlowStart=0;perfStart=now;perfFrames=0}if(document.hidden){requestAnimationFrame(tick);return}if(machine.is(states.IDLE)||machine.is(states.RESULT))return;let all=true;for(const o of view.objects){const f=o.userData.flight;if(!f)continue;const t=Math.max(0,(now-f.start)/1000);if(t<f.T){all=false;o.position.x=f.startX+(f.targetX-f.startX)*Math.min(1,t/f.T);o.position.y=f.startY+f.g*f.T*t-.5*f.g*t*t;o.rotation.z=Math.sin(t*4+o.userData.id)*.08}else{o.position.set(f.targetX,f.targetY,0);o.userData.apex=true}}view.render();if(now>=launchAt&&!apex){apex=true;machine.go(states.DRAW);drawEnd=Date.now()+DRAW_TIME*1000;if(!low)gsap.to({v:1},{v:.03,duration:.3,onUpdate:()=>{}});requestAnimationFrame(timerTick)}if(!machine.is(states.DRAW))requestAnimationFrame(tick)}function timerTick(){if(!machine.is(states.DRAW))return;if(document.hidden){requestAnimationFrame(timerTick);return}const perfNow=performance.now();perfFrames++;if(perfNow-perfStart>1000){const fps=perfFrames*1000/(perfNow-perfStart);if(fps<45){if(!perfSlowStart)perfSlowStart=perfNow;if(perfNow-perfSlowStart>2000&&!low){low=true;document.querySelector('#lowQuality').textContent='⚙ Low quality: on';view.renderer.setPixelRatio(1);view.resize()}}else perfSlowStart=0;perfStart=perfNow;perfFrames=0}const left=Math.max(0,(drawEnd-Date.now())/1000);document.querySelector('#seconds').textContent=Math.ceil(left);document.querySelector('.progress').style.strokeDashoffset=163*(1-left/DRAW_TIME);view.render();if(left<=0){judge(true);return}requestAnimationFrame(timerTick)}
+function coords(e){const r=canvas.getBoundingClientRect();return{x:((e.clientX-r.left)/r.width-.5)*2*(r.width/r.height*3.2),y:(.5-(e.clientY-r.top)/r.height)*6.4}}
+function nearestStroke(pt){return strokes.map(s=>s.map(v=>[Math.hypot(v.x-pt.x,v.y-pt.y),v])).flat().sort((a,b)=>a[0]-b[0]).slice(0,1)[0]?.[1]}
+function playerPredict(x,flip=false){const p=toDisplayPoint(x);let side;if(['Perceptron','Logistic Regression','Linear SVM'].includes(classifier)){if(!playerLine||playerLine.length<2)return -1;const[a,b]=playerLine;side=linearBoundaryClass(a,b,p)}else{if(strokes.length===0)return -1;side=freehandBoundaryClass(strokes,p)}return(flip?-side:side)>=0?1:-1}
+function finishEarly(){if(machine.is(states.DRAW))judge(false)}
+function judge(timeout=false){
+  if(!machine.is(states.DRAW))return;
+  machine.go(states.JUDGE);
+  const userBoundary=captureBoundary();
+  roundStats.displayTransform=waveTransform;
+  roundStats.trainingPoints=trainingExamples.map(p=>({x:[...p.x],y:p.y}));
+  roundStats.graphOptions={probability:false,supportVectors:false,margins:false,training:false};
+  roundStats=finalizeRound(roundStats,{points,model:models,playerPredict,userBoundary});
+  roundStats.timedOut=timeout&&!roundStats.boundaryDrawn;
+  roundStats.classifierName=challengeMode==='Mystery model'?mysteryName:classifier;roundStats.challengeMode=challengeMode;if(challengeMode==='Pick the model'&&challengeGuess){const ranked=classifierNames.map(name=>{const model=createClassifier(name,{},waveSeed).fit(trainingExamples.map(p=>p.x),trainingExamples.map(p=>p.y));return{name,accuracy:statsAccuracy(model,points)}}).sort((a,b)=>b.accuracy-a.accuracy);const best=ranked[0];roundStats.challengeResult=`You picked ${challengeGuess}; ${best.name} scored highest at ${Number((best.accuracy*100).toFixed(1))}%.`;if(best.name===challengeGuess){roundStats.score+=25;roundStats.challengeResult+=' +25 bonus points!'}else roundStats.challengeResult+=' Try another pattern to improve your guess.'}
+  roundStats.classifierSummary=classifierInfo[classifier][1];
+  score+=roundStats.score;
+  streak=roundStats.bombsHit?0:streak+1;
+  document.querySelector('#score').textContent=score;
+  document.querySelector('#streak').textContent=streak;
+  for(const o of view.objects){if(o.userData.fruit&&points[o.userData.id]?.y===1&&playerPredict(points[o.userData.id].x,roundStats.flipped)===1)o.scale.setScalar(1.3);if(!o.userData.fruit&&points[o.userData.id]?.y===-1&&playerPredict(points[o.userData.id].x,roundStats.flipped)===1)o.rotation.z+=.5}
+  view.render();
+  renderResults(roundStats);
 }
+function statsAccuracy(model,wave){return wave.length===0?0:wave.reduce((n,p)=>n+Number(model.predict(p.x)===p.y),0)/wave.length}
+function showPickChallenge(){document.querySelector('#modal').innerHTML=`<div class="overlay"><section class="dialog"><h1>Pick the model</h1><p>Which classifier do you think will score highest on <b>${dataset}</b>? A correct prediction earns 25 bonus points.</p><div class="picker">${classifierNames.map(name=>`<button data-guess="${name}">${name}</button>`).join('')}</div></section></div>`;document.querySelectorAll('[data-guess]').forEach(button=>button.onclick=()=>{challengeGuess=button.dataset.guess;startWave(false,true)})}
+function nextLesson(){const lessons=[['XOR','Perceptron','No straight line can divide diagonal XOR classes; try a kernel or tree model.'],['Correlated blobs','LDA','LDA uses feature correlation; diagonal Naive Bayes ignores it.'],['Two moons','Decision Tree','A forest averages many boxy trees to reduce the variance of one tree.'],['Overlapping blobs','k-NN','Small k follows local noise; larger k smooths ambiguous overlap.']];const [data,model,takeaway]=lessons[lessonIndex%lessons.length];lessonIndex++;document.querySelector('#dataset').value=data;dataset=data;document.querySelector('#classifier').value=model;classifier=model;modelParams={};updateInfo();say(`Lesson ${lessonIndex}: ${takeaway}`);document.querySelector('#lessonButton').textContent=`🎓 Lesson ${lessonIndex%lessons.length+1}: ${takeaway}`}
+const classifierRecommendations={
+  'Separable blobs':{models:['Linear SVM','Logistic Regression','Perceptron'],reason:'These compact groups are usually separable with a straight boundary.'},
+  'Overlapping blobs':{models:['Linear SVM','Logistic Regression','k-NN'],reason:'The classes overlap, so some errors are unavoidable. A regularized linear model is a sensible baseline.'},
+  'XOR':{models:['Kernel SVM','Decision Tree','Random Forest'],reason:'Alternating XOR corners need a nonlinear or split-based boundary.'},
+  'Two moons':{models:['Kernel SVM','k-NN','Random Forest'],reason:'The two curved bands need a boundary that can bend with them.'},
+  'Circles':{models:['Kernel SVM','k-NN','QDA'],reason:'A curved model can represent one class surrounding the other.'},
+  'Spirals':{models:['Kernel SVM','k-NN','Random Forest'],reason:'The winding classes need a flexible nonlinear boundary.'},
+  'Correlated blobs':{models:['LDA','Linear SVM','Logistic Regression'],reason:'LDA can use the shared correlation in the tilted groups.'},
+  'Unequal-variance blobs':{models:['QDA','Kernel SVM','Random Forest'],reason:'QDA can model a different covariance shape for each class.'},
+  'Outlier blobs':{models:['Random Forest','Logistic Regression','k-NN'],reason:'An ensemble or regularized model can be less sensitive to individual outliers.'},
+  'Checkerboard (3x3)':{models:['Decision Tree','Random Forest','Kernel SVM'],reason:'Alternating squares need multiple splits or a nonlinear boundary.'},
+};
+function recommendedClassifier(data,selected){const fit=classifierRecommendations[data];if(!fit)return null;const name=fit.models.find(candidate=>candidate!==selected)??fit.models[0];return{name,reason:fit.reason}}
+function renderResults(stats){
+  machine.go(states.RESULT);
+  const userPercent=`${Number((stats.userAccuracy*100).toFixed(2))}%`;
+  const modelPercent=`${Number((stats.modelAccuracy*100).toFixed(2))}%`;const challengeNote=stats.challengeResult?`<p class="challenge-note">${stats.challengeResult}</p>`:'';const mysteryReveal=stats.challengeMode==='Mystery model'?`<p class="challenge-note">Mystery model revealed: <b>${stats.classifierName}</b> (${models.metadata.family}). Guess its family below for a +25 point bonus.</p><div class="family-guesses">${['linear','nonlinear','probabilistic','tree','ensemble'].map(f=>`<button data-family="${f}">${f}</button>`).join('')}</div>`:'';
+  const heading=stats.timedOut?'Time’s up!':stats.verdict;
+  const explanation=stats.boundaryDrawn?`${stats.classifierSummary} Your boundary matched ${userPercent} of ${stats.total} points; the trained model reached ${modelPercent}.`:`No boundary drawn. Your accuracy is 0% across ${stats.total} points; the trained model reached ${modelPercent}.`;
+  const suggestion=stats.modelAccuracy<0.7?recommendedClassifier(dataset,classifier):null;
+  const modelNote=suggestion?`<div class="model-note"><b>Model suggestion</b><p>${suggestion.reason} Try <strong>${suggestion.name}</strong> for this dataset.</p><button data-action="recommend" data-model="${suggestion.name}">Try ${suggestion.name}</button></div>`:'';
+  const logisticResult=classifier==='Logistic Regression'?'<section class="result-logistic"><h2>How the model estimated fruit probability</h2><p>Each dot is a point from this round. Its horizontal position shows the model’s evidence, and its height shows the estimated fruit chance. The 50% line marks where the prediction changes from bomb to fruit.</p><canvas id="resultLogisticPlot" width=280 height=160 aria-label="Logistic regression sigmoid with this round’s points"></canvas></section>':'';
+  const knnResult=classifier==='k-NN'?`<section class="result-knn"><h2>k-NN settings and vote</h2><p><strong>k = ${models.k}</strong> of ${trainingExamples.length} training examples. For each point, k-NN finds its nearest examples using scaled Euclidean distance, then predicts the class that gets the most votes. A larger k usually makes a smoother boundary.</p></section>`:'';
+  const gaussianResult=classifier==='Gaussian Naive Bayes'?'<section class="result-gaussian"><h2>How Gaussian Naive Bayes decides</h2><p><b>1. Start with a prior:</b> how common fruit and bombs are in the training examples.</p><p><b>2. Check the likelihood:</b> for each feature, compare the point with that class’s Gaussian (bell-shaped) distribution. The <b>mean</b> is its center; the <b>variance</b> describes its spread.</p><p><b>3. Find the posterior:</b> combine the prior with the feature likelihoods using Bayes’ theorem. The class with the higher posterior probability wins.</p><p><b>Naive assumption:</b> it treats the features as independent within each class, so it multiplies their likelihoods. That can be inaccurate when the features are strongly correlated.</p></section>':'';
 
-// Start application
-window.addEventListener('DOMContentLoaded', () => {
-  new MLNinjaApp();
-});
 
+  const fruitCount=stats.points.filter(point=>point.y===1).length,bombCount=stats.points.filter(point=>point.y===-1).length;
+  const pointLegend=`<small class="point-legend">Background shows model predictions · ● ${fruitCount} fruit labels · ◆ ${bombCount} bomb labels · gold outline marks a model error</small>`;
+  const svmLegend=['Linear SVM','Kernel SVM'].includes(classifier)?'<small class="svm-legend">Solid line: model boundary · dashed lines: ±1 margin · gold rings: support vectors</small>':'';
+  const matrix=stats.confusionMatrix;
+  const safeRatio=(numerator,denominator)=>denominator===0?0:numerator/denominator;
+  const precision=safeRatio(matrix.tp,matrix.tp+matrix.fp),recall=safeRatio(matrix.tp,matrix.tp+matrix.fn),f1=safeRatio(2*precision*recall,precision+recall);
+  const beatBadge=stats.userAccuracy>=stats.modelAccuracy?'<span class="beat-badge">🏆 Beat the model!</span>':'';
+  let records={};try{records=JSON.parse(localStorage.getItem('mlninja.records')??'{}')}catch{}
+  const recordKey=`${classifier}|${dataset}`,record=records[recordKey]??{player:0,model:0};record.player=Math.max(record.player,stats.userAccuracy);record.model=Math.max(record.model,stats.modelAccuracy);records[recordKey]=record;try{localStorage.setItem('mlninja.records',JSON.stringify(records))}catch{}
+  const explanationLead=stats.modelAccuracy>=.85?'Strong fit.':'This model struggled.';const modelDetail=models.trees?`${explanationLead} The forest used ${models.trees.length} trees and ${models.splitCount} splits on ${dataset}. ${datasetInfo[dataset]}`:models.splitCount!==undefined?`${explanationLead} The tree used ${models.splitCount} axis-aligned splits on ${dataset}. ${datasetInfo[dataset]}`:models.metadata.name==='k-NN'?`${explanationLead} Used k=${models.k} of ${trainingExamples.length} training examples with Euclidean distance after feature scaling. ${datasetInfo[dataset]}`:`${explanationLead} ${classifierInfo[classifier][0]} boundary against ${dataset}. ${datasetInfo[dataset]}`;
+  document.querySelector('#modal').innerHTML=`<div class="overlay"><section class="dialog"><div style="font-size:42px">${stats.userAccuracy>=.9?'🎉':stats.userAccuracy>=.75?'🌟':'🫣'}</div><h1>${heading}</h1><div class="stats"><div class="stat"><b>${userPercent}</b><small>Your accuracy</small></div><div class="stat"><b>${modelPercent}</b><small>Model accuracy</small></div><div class="stat"><b>${stats.score}</b><small>Round score</small></div></div><p>${explanation}</p>${challengeNote}${mysteryReveal}<p class="metric-line">Fruit precision ${Number((precision*100).toFixed(1))}% · recall ${Number((recall*100).toFixed(1))}% · F1 ${Number((f1*100).toFixed(1))}%</p><p class="metric-line">Your boundary matched the model on ${Number((stats.modelAgreement*100).toFixed(1))}% of points: +${stats.agreementScore} score points.</p>${beatBadge}<span class="shape-badge">Boundary: ${classifierInfo[classifier][0]}</span><p class="why-line">${modelDetail}</p><p class="record-line">Best across this model/dataset: you ${Number((record.player*100).toFixed(1))}% · model ${Number((record.model*100).toFixed(1))}%</p>${modelNote}<div class="result-viz"><canvas id="boundaryPlot" width="220" height="220" aria-label="Model regions, data points, and your boundary"></canvas><canvas id="confusionPlot" width="180" height="130" aria-label="Model confusion matrix"></canvas></div>${pointLegend}${svmLegend}${logisticResult}${knnResult}${gaussianResult}<div class="toolbar"><button class="primary" data-action="retry">🔁 Retry same data</button><button data-action="next">Next wave →</button><button data-action="compare">Compare all classifiers</button><button data-action="picker">🧠 Change model</button><button data-action="dataset">🌈 Change dataset</button></div></section></div>`;
+  drawResultGraph(document.querySelector('#boundaryPlot'),stats);
+  drawConfusion(document.querySelector('#confusionPlot'),[[matrix.tp,matrix.fn],[matrix.fp,matrix.tn]]);
+  if(classifier==='Logistic Regression')drawLogisticPlot(document.querySelector('#resultLogisticPlot'),models,stats.points);
+  if(!document.body.classList.contains('reduced-motion'))gsap.from('.dialog',{y:20,opacity:0,duration:.35,ease:'back.out(1.4)'});
+  document.querySelectorAll('[data-family]').forEach(button=>button.onclick=()=>{const right=button.dataset.family===models.metadata.family;const bonus=right?25:0;score+=bonus;stats.score+=bonus;document.querySelector('#score').textContent=score;document.querySelectorAll('.stat b')[2].textContent=stats.score;document.querySelector('.challenge-note').textContent=right?'Correct family! +25 points.':`Not quite — this model is ${models.metadata.family}.`});
+  document.querySelectorAll('[data-action]').forEach(button=>button.onclick=()=>{const action=button.dataset.action;if(action==='picker')showPicker();else if(action==='compare')showCompare(stats);else if(action==='recommend'){document.querySelector('#classifier').value=button.dataset.model;classifier=button.dataset.model;modelParams={};startWave()}else if(action==='retry')startWave(true);else if(action==='dataset'){const index=(datasets.indexOf(dataset)+1)%datasets.length;document.querySelector('#dataset').value=datasets[index];startWave()}else startWave()});
+}
+function showCompare(stats){
+  document.querySelector('#modal').innerHTML=`<div class="overlay"><section class="dialog compare-dialog"><h1>Compare all classifiers</h1><p>All ten models use the same training examples and this round’s points. Every graph uses the same fruit-circle and bomb-diamond markers, and shows your boundary. SVM graphs also show the model separator and margin lines.</p><div id="compareGrid" class="compare-grid"></div><button id="compareBack">Back to results</button></section></div>`;
+  const entries=[];
+  for(const name of classifierNames){const model=createClassifier(name,{},waveSeed).fit(trainingExamples.map(p=>p.x),trainingExamples.map(p=>p.y));const correct=stats.points.reduce((n,p)=>n+Number(model.predict(p.x)===p.y),0),accuracy=stats.total===0?0:correct/stats.total;entries.push({name,model,accuracy,predictions:stats.points.map(point=>model.predict(point.x))})}
+  const best=Math.max(...entries.map(e=>e.accuracy)),worst=Math.min(...entries.map(e=>e.accuracy));
+  const grid=document.querySelector('#compareGrid');grid.innerHTML=entries.map((e,i)=>`<article class="compare-item ${e.accuracy===best?'best':''} ${e.accuracy===worst?'worst':''}"><b>${e.name}</b><canvas width="144" height="112" id="compare-${i}" aria-label="${e.name} decision regions"></canvas><small>${Number((e.accuracy*100).toFixed(1))}%${e.accuracy===best?' · best':''}${e.accuracy===worst?' · lowest':''}</small></article>`).join('');
+  entries.forEach((e,i)=>{const gridSize=32,modelPredictionGrid=Array.from({length:gridSize},(_,row)=>Array.from({length:gridSize},(_,col)=>e.model.predict([col/(gridSize-1)*4-2,2-row/(gridSize-1)*4])));drawResultGraph(document.querySelector(`#compare-${i}`),{...stats,classifierName:e.name,modelLinearSvm:e.name==='Linear SVM'?{w:[...e.model.w],b:e.model.b,mean:[...e.model.scaler.mean],scale:[...e.model.scaler.scale]}:null,modelScoreGrid:e.name==='Kernel SVM'?Array.from({length:gridSize},(_,row)=>Array.from({length:gridSize},(_,col)=>e.model.score([col/(gridSize-1)*4-2,2-row/(gridSize-1)*4]))):[],modelSupportVectors:[],modelPredictionGrid,modelPredictions:e.predictions})});
+  document.querySelector('#compareBack').onclick=()=>renderResults(stats);
+}
+function showPicker(){document.querySelector('#modal').innerHTML=`<div class="overlay"><section class="dialog"><div style="font-size:32px">🧠</div><h1>Pick your next challenge</h1><p>Choose the kind of boundary you want to learn.</p><div class="picker">${classifierNames.map((n,i)=>`<button data-model="${n}" class="${n===classifier?'active':''}">${i+1} · ${n}</button>`).join('')}</div><button data-close>Back</button></section></div>`;document.querySelectorAll('[data-model]').forEach(b=>b.onclick=()=>{document.querySelector('#classifier').value=b.dataset.model;startWave()});document.querySelector('[data-close]').onclick=()=>document.querySelector('#modal').innerHTML=''}
+function captureBoundary(){if(['Perceptron','Logistic Regression','Linear SVM'].includes(classifier))return playerLine?{type:'line',points:playerLine.map(p=>({x:p.x,y:p.y}))}:null;return strokes.length?{type:'freehand',strokes:strokes.map(stroke=>stroke.map(p=>({x:p.x,y:p.y})))}:null}
+function pointerNdc(e){const rect=canvas.getBoundingClientRect();return new THREE.Vector2((e.clientX-rect.left)/rect.width*2-1,-((e.clientY-rect.top)/rect.height)*2+1)}
+function sliceAt(e){const ndc=pointerNdc(e);raycaster.setFromCamera(ndc,view.camera);const live=view.objects.filter(object=>object.userData.alive);view.scene.updateMatrixWorld(true);const hit=raycaster.intersectObjects(live,true).find(item=>item.object.userData.hitShape);if(!hit)return;let target=hit.object;while(target&&target.userData?.id===undefined)target=target.parent;if(!target||!target.userData.alive)return;target.userData.alive=false;recordRoundHit(roundStats,target.userData.y);
+document.querySelector('#score').textContent=score+roundStats.score;sound(target.userData.y===1?'splat':'bomb',muted);view.scene.remove(target);view.render()}
+function sliceSegment(from,to){const dx=to.clientX-from.clientX,dy=to.clientY-from.clientY,steps=Math.max(1,Math.ceil(Math.hypot(dx,dy)/12));for(let i=1;i<=steps;i++)sliceAt({clientX:from.clientX+dx*i/steps,clientY:from.clientY+dy*i/steps})}
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+canvas.addEventListener('pointerdown',e=>{const isLaunch=machine.is(states.LAUNCH),isShiftSlice=machine.is(states.DRAW)&&(sliceMode||e.shiftKey||e.button===2);if(isLaunch||isShiftSlice){e.preventDefault();sliceGesture=true;lastSlicePointer={clientX:e.clientX,clientY:e.clientY};canvas.setPointerCapture(e.pointerId);sliceAt(e);return}if(!machine.is(states.DRAW))return;drawing=true;canvas.setPointerCapture(e.pointerId);const pt=coords(e);if(['Perceptron','Logistic Regression','Linear SVM'].includes(classifier)){playerLine=[pt,pt]}else{strokes.push([pt])}drawOverlay();view.render()});
+canvas.addEventListener('pointermove',e=>{if(sliceGesture){const next={clientX:e.clientX,clientY:e.clientY};sliceSegment(lastSlicePointer,next);lastSlicePointer=next;return}if(!drawing||!machine.is(states.DRAW))return;const p=coords(e);if(['Perceptron','Logistic Regression','Linear SVM'].includes(classifier))playerLine[1]=p;else strokes.at(-1).push(p);drawOverlay();view.render()});
+function endPointer(){drawing=false;sliceGesture=false;lastSlicePointer=null}canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',endPointer);
+const overlay=document.createElement('canvas');overlay.style.cssText='position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1';document.querySelector('.canvas-wrap').appendChild(overlay);function drawOverlay(){const rect=canvas.getBoundingClientRect();overlay.width=rect.width*devicePixelRatio;overlay.height=rect.height*devicePixelRatio;const c=overlay.getContext('2d');c.scale(devicePixelRatio,devicePixelRatio);const aspect=rect.width/rect.height;const project=p=>({x:(p.x/(aspect*3.2)+1)*rect.width/2,y:(1-p.y/3.2)*rect.height/2});c.lineWidth=8;c.lineCap='round';c.strokeStyle='white';c.shadowColor='#ffb5a7';c.shadowBlur=8;for(const line of (playerLine?[playerLine]:strokes)){if(line.length<2)continue;c.beginPath();line.forEach((p,i)=>{const q=project(p);i?c.lineTo(q.x,q.y):c.moveTo(q.x,q.y)});c.stroke()}}
+addEventListener('resize',drawOverlay);document.querySelector('#toggleLab').onclick=()=>togglePanel('labPanel','toggleLab');document.querySelector('#toggleHow').onclick=()=>togglePanel('howPanel','toggleHow');document.querySelector('#start').onclick=startWave;document.querySelector('#submit').onclick=finishEarly;document.querySelector('#sliceMode').onclick=e=>{sliceMode=!sliceMode;e.currentTarget.textContent=sliceMode?'✏️ Drawing mode':'🔪 Slice mode'};document.querySelector('#classifier').onchange=()=>{classifier=document.querySelector('#classifier').value;modelParams={};updateInfo()};document.querySelector('#challengeMode').onchange=e=>{challengeMode=e.target.value;challengeGuess=null;mysteryName=null;document.querySelector('#classifier').disabled=challengeMode==='Mystery model'};document.querySelector('#lessonButton').onclick=nextLesson;document.querySelector('#colorblindMode').onchange=e=>{document.body.classList.toggle('colorblind-mode',e.target.checked);try{localStorage.setItem('mlninja.colorblind',String(e.target.checked))}catch{};drawOverlay()};document.querySelector('#reducedMotion').onchange=e=>{document.body.classList.toggle('reduced-motion',e.target.checked);try{localStorage.setItem('mlninja.reducedMotion',String(e.target.checked))}catch{}};document.querySelector('#dataset').onchange=()=>{dataset=document.querySelector('#dataset').value;updateInfo()};document.querySelector('#waveSize').oninput=updateInfo;document.querySelector('#noise').oninput=updateInfo;document.querySelector('#labelNoise').oninput=updateInfo;document.querySelector('#lowQuality').onclick=e=>{low=!low;e.currentTarget.textContent=`⚙ Low quality: ${low?'on':'off'}`;view.renderer.setPixelRatio(low?1:Math.min(devicePixelRatio||1,1.5));view.resize()};document.querySelector('#sound').onclick=e=>{muted=!muted;e.currentTarget.textContent=muted?'🔇 Sound off':'🔊 Sound on'};addEventListener('keydown',e=>{if(e.code==='Space'&&(machine.is(states.IDLE)||machine.is(states.RESULT))){e.preventDefault();startWave()}if(e.key==='Enter')finishEarly();if(e.key.toLowerCase()==='x'&&machine.is(states.DRAW)){sliceMode=!sliceMode;document.querySelector('#sliceMode').textContent=sliceMode?'✏️ Drawing mode':'🔪 Slice mode'}if(e.key.toLowerCase()==='r')startWave();if(e.key.toLowerCase()==='d'){const s=document.querySelector('#dataset');s.selectedIndex=(s.selectedIndex+1)%s.options.length;dataset=s.value}if(e.key>='1'&&e.key<='9'&&machine.is(states.RESULT)){document.querySelector('#classifier').value=classifierNames[+e.key-1];classifier=classifierNames[+e.key-1];startWave()}});document.addEventListener('visibilitychange',()=>{if(document.hidden)return;view.render()});
+function togglePanel(panelId,buttonId){const panel=document.querySelector(`#${panelId}`),button=document.querySelector(`#${buttonId}`);panel.classList.toggle('drawer-open');const expanded=panel.classList.contains('drawer-open');button.setAttribute('aria-expanded',String(expanded));document.querySelectorAll('.drawer-open').forEach(openPanel=>{if(openPanel!==panel)openPanel.classList.remove('drawer-open')});document.querySelectorAll('.drawer-toggle').forEach(toggle=>{if(toggle!==button)toggle.setAttribute('aria-expanded','false')})}
+try{const cb=localStorage.getItem('mlninja.colorblind')==='true',rm=localStorage.getItem('mlninja.reducedMotion')==='true';document.querySelector('#colorblindMode').checked=cb;document.querySelector('#reducedMotion').checked=rm;document.body.classList.toggle('colorblind-mode',cb);document.body.classList.toggle('reduced-motion',rm)}catch{};updateInfo();machine.go(states.IDLE);drawOverlay();const gameGuideRoot=document.querySelector('#modal');document.querySelector('#guideButton').addEventListener('click',()=>openGameGuide(gameGuideRoot));if(shouldShowGameGuide())openGameGuide(gameGuideRoot);

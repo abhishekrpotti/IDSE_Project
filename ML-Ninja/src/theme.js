@@ -1,0 +1,1 @@
+export const theme={ink:'#3e4058',outline:'#6d6875',fruit:['#ffb5a7','#b5ead7','#fff1a8','#cdb4db','#a0d8f1','#ffc8dd'],bomb:'#5c5f7a',fruitHalo:'#8ee3c2',bombHalo:'#ff8a8a',cream:'#fff5e9',sky:'#e3f2fd'};

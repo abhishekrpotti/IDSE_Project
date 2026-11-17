@@ -1,10 +1,1 @@
-import { defineConfig } from 'vite';
-
-export default defineConfig({
-  root: '.',
-  server: {
-    port: 5173,
-    host: true
-  }
-});
-
+import {defineConfig} from 'vite'; export default defineConfig({base:'./',test:{environment:'node'}});

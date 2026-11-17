@@ -1,0 +1,1 @@
+export const states={IDLE:'IDLE',LAUNCH:'LAUNCH',DRAW:'DRAW',JUDGE:'JUDGE',RESULT:'RESULT'};export class StateMachine{constructor(onChange=()=>{}){this.state=states.IDLE;this.onChange=onChange}go(next){this.state=next;this.onChange(next)}is(s){return this.state===s}}
