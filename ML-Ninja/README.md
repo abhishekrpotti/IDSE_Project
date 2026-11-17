@@ -1,6 +1,6 @@
 # ML Ninja 🍉
 
-[Click here to play the game online]https://arpitsrivastavain.github.io/ML-Ninja/
+[Click here to play the game online](https://arpitsrivastavain.github.io/ML-Ninja/)
 
 An interactive, static browser game about classical machine learning. Every fruit and bomb is a labeled point; draw the decision boundary that separates the two classes.
 
